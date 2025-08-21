@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import axios from "axios";
 import archiver from "archiver";
@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import { pipeline } from "stream/promises";
 
-export async function POST(request) {
+export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
     const file = formData.get("file");
@@ -18,7 +18,7 @@ export async function POST(request) {
     }
 
     // Convert file to buffer
-    const bytes = await file.arrayBuffer();
+    const bytes = await (file as File).arrayBuffer();
     const buffer = Buffer.from(bytes);
 
     // Parse Excel file
@@ -30,7 +30,7 @@ export async function POST(request) {
     const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
     // Find the "Photo Link" column
-    const headerRow = jsonData[0];
+    const headerRow = jsonData[0] as any[];
     let photoLinkIndex = -1;
 
     for (let i = 0; i < headerRow.length; i++) {
@@ -45,9 +45,10 @@ export async function POST(request) {
     }
 
     // Extract photo URLs (skip header row)
-    const photoUrls = [];
+    const photoUrls: string[] = [];
     for (let i = 1; i < jsonData.length; i++) {
-      const url = jsonData[i][photoLinkIndex];
+      const row = jsonData[i] as any[];
+      const url = row[photoLinkIndex];
       if (url && typeof url === "string" && url.startsWith("http")) {
         photoUrls.push(url);
       }
@@ -89,7 +90,7 @@ export async function POST(request) {
 
         await pipeline(response.data, writer);
         return { success: true, filename };
-      } catch (error) {
+      } catch (error: any) {
         console.error(`Failed to download ${url}:`, error.message);
         return { success: false, error: error.message };
       }
@@ -115,7 +116,7 @@ export async function POST(request) {
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
 
-    archive.on("error", (err) => {
+    archive.on("error", (err: any) => {
       throw err;
     });
 
@@ -138,7 +139,7 @@ export async function POST(request) {
       totalUrls: photoUrls.length,
       downloadUrl: `/api/download/${zipFilename}`,
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error processing Excel file:", error);
     return NextResponse.json({ error: "Failed to process Excel file: " + error.message }, { status: 500 });
   }

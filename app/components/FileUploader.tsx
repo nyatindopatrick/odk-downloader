@@ -2,15 +2,24 @@
 
 import { useState } from "react";
 
-export default function FileUploader({ credentials }) {
-  const [file, setFile] = useState(null);
+interface Credentials {
+  username: string;
+  password: string;
+}
+
+interface FileUploaderProps {
+  credentials: Credentials;
+}
+
+export default function FileUploader({ credentials }: FileUploaderProps) {
+  const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
   const [downloadLink, setDownloadLink] = useState("");
   const [progress, setProgress] = useState(0);
 
-  const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
     if (selectedFile) {
       if (!selectedFile.name.match(/\.(xlsx|xls)$/)) {
         setMessage("Please select a valid Excel file (.xlsx or .xls)");
@@ -67,7 +76,7 @@ export default function FileUploader({ credentials }) {
         setMessage(`Successfully processed ${data.photoCount} photos!`);
         setDownloadLink(data.downloadUrl);
       }, 5000);
-    } catch (error) {
+    } catch (error: any) {
       setStatus("error");
       setMessage(`Error: ${error.message}`);
       setProgress(0);

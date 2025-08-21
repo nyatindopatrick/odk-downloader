@@ -1,10 +1,10 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 
-export async function GET(request, { params }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ filename: string }> }) {
   try {
-    const filename = params.filename;
+    const { filename } = await params;
 
     // Validate filename to prevent directory traversal
     if (!filename || filename.includes("..") || !filename.endsWith(".zip")) {
@@ -22,7 +22,7 @@ export async function GET(request, { params }) {
     const fileBuffer = await fs.promises.readFile(filePath);
 
     // Return file as response
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(fileBuffer as BodyInit, {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${filename}"`,
