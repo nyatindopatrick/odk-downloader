@@ -7,12 +7,17 @@ import path from "path";
 import { pipeline } from "stream/promises";
 
 export async function POST(request: NextRequest) {
+  let tempDir: string | undefined;
+  
   try {
     // Check if we're in a serverless environment and /tmp is available
     const isServerless = process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
     const tempBaseDir = isServerless ? "/tmp" : path.join(process.cwd(), "public");
     
     console.log(`Environment: ${isServerless ? 'Serverless' : 'Local'}, Temp dir: ${tempBaseDir}`);
+    
+    // Set a reasonable timeout for the entire operation (8 seconds for Netlify, longer for local)
+    const operationTimeout = isServerless ? 8000 : 30000;
     
     const formData = await request.formData();
     const file = formData.get("file");
@@ -64,14 +69,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No valid photo URLs found in the Excel file" }, { status: 400 });
     }
 
+    // Limit the number of photos for serverless platforms to prevent timeouts
+    const maxPhotos = isServerless ? 30 : 100;
+    if (photoUrls.length > maxPhotos) {
+      return NextResponse.json({ 
+        error: `Too many photos (${photoUrls.length}). Maximum allowed is ${maxPhotos} for serverless deployment.`,
+        suggestion: "Please split your Excel file into smaller batches."
+      }, { status: 400 });
+    }
+
     // Warn about potential timeout on serverless platforms
-    if (isServerless && photoUrls.length > 50) {
+    if (isServerless && photoUrls.length > 20) {
       console.warn(`Warning: Processing ${photoUrls.length} photos may exceed serverless function timeout limits`);
     }
 
     // Create temporary directory for photos
     const timestamp = Date.now();
-    const tempDir = path.join(tempBaseDir, `photos_${timestamp}`);
+    tempDir = path.join(tempBaseDir, `photos_${timestamp}`);
     const zipDir = path.join(tempBaseDir, "downloads");
 
     // Ensure directories exist
@@ -83,6 +97,9 @@ export async function POST(request: NextRequest) {
     // Download photos with basic auth
     const auth = Buffer.from(`${username}:${password}`).toString("base64");
     console.log(`Starting download of ${photoUrls.length} photos...`);
+    
+    // Add timeout for downloads
+    const downloadTimeout = Math.min(operationTimeout - 2000, 25000); // Leave 2 seconds for zip creation
     
     const downloadPromises = photoUrls.map(async (url, index) => {
       try {
@@ -97,10 +114,10 @@ export async function POST(request: NextRequest) {
           headers: {
             Authorization: `Basic ${auth}`,
           },
-          timeout: 30000,
+          timeout: downloadTimeout,
         });
 
-        const filePath = path.join(tempDir, filename);
+        const filePath = path.join(tempDir!, filename);
         const writer = fs.createWriteStream(filePath);
 
         await pipeline(response.data, writer);
@@ -111,14 +128,24 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    const results = await Promise.all(downloadPromises);
+    // Add timeout for the entire download process
+    const downloadResults = await Promise.race([
+      Promise.all(downloadPromises),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Download timeout")), downloadTimeout)
+      )
+    ]);
+    
+    const results = downloadResults as any[];
     const successfulDownloads = results.filter((r) => r.success);
     
     console.log(`Download completed: ${successfulDownloads.length}/${photoUrls.length} successful`);
 
     if (successfulDownloads.length === 0) {
       // Cleanup temp directory
-      await fs.promises.rmdir(tempDir, { recursive: true });
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
       return NextResponse.json({ error: "Failed to download any photos. Check your credentials." }, { status: 500 });
     }
 
@@ -127,26 +154,53 @@ export async function POST(request: NextRequest) {
     const zipPath = path.join(zipDir, zipFilename);
     console.log(`Creating zip file: ${zipPath}`);
     
-    const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    // Create zip file with proper promise handling and timeout
+    const zipResult = await Promise.race([
+      new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(zipPath);
+        const archive = archiver("zip", { zlib: { level: 9 } });
 
-    output.on("close", async () => {
-      // Delete temporary directory after zipping
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    });
+        output.on("close", async () => {
+          try {
+            // Delete temporary directory after zipping
+            if (tempDir) {
+              await fs.promises.rm(tempDir, { recursive: true, force: true });
+            }
+            console.log("Zip file created successfully and temp directory cleaned up");
+            resolve(true);
+          } catch (cleanupError) {
+            console.error("Cleanup error:", cleanupError);
+            // Don't fail the whole operation for cleanup errors
+            resolve(true);
+          }
+        });
 
-    archive.on("error", (err: any) => {
-      throw err;
-    });
+        output.on("error", (err) => {
+          reject(new Error(`Failed to create zip file: ${err.message}`));
+        });
 
-    archive.pipe(output);
-    archive.directory(tempDir, false);
-    await archive.finalize();
+        archive.on("error", (err) => {
+          reject(new Error(`Archive error: ${err.message}`));
+        });
+
+        archive.pipe(output);
+        archive.directory(tempDir!, false);
+        archive.finalize();
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("Zip creation timeout")), operationTimeout - 1000)
+      )
+    ]);
+
+    if (!zipResult) {
+      throw new Error("Failed to create zip file");
+    }
 
     // Schedule cleanup of zip file after 1 hour
     setTimeout(async () => {
       try {
         await fs.promises.unlink(zipPath);
+        console.log("Zip file cleaned up after timeout");
       } catch (error) {
         console.error("Failed to cleanup zip file:", error);
       }
@@ -160,6 +214,30 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: any) {
     console.error("Error processing Excel file:", error);
-    return NextResponse.json({ error: "Failed to process Excel file: " + error.message }, { status: 500 });
+    
+    // Cleanup any temporary directories that might have been created
+    try {
+      if (typeof tempDir !== 'undefined') {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+        console.log("Cleaned up temp directory on error");
+      }
+    } catch (cleanupError) {
+      console.error("Failed to cleanup temp directory:", cleanupError);
+    }
+    
+    // Ensure we always return valid JSON, even on errors
+    const errorMessage = error.message || "Unknown error occurred";
+    
+    // Check if this is a timeout error
+    if (errorMessage.includes("timeout")) {
+      return NextResponse.json({ 
+        error: "Operation timed out. Please try with fewer photos or contact support.",
+        details: errorMessage 
+      }, { status: 408 });
+    }
+    
+    return NextResponse.json({ 
+      error: "Failed to process Excel file: " + errorMessage 
+    }, { status: 500 });
   }
 }
