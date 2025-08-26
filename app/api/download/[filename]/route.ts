@@ -11,7 +11,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
     }
 
-    const filePath = path.join(process.cwd(), "public", "downloads", filename);
+    // Check if we're in a serverless environment and /tmp is available
+    const isServerless = process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const tempBaseDir = isServerless ? "/tmp" : path.join(process.cwd(), "public");
+    
+    const filePath = path.join(tempBaseDir, "downloads", filename);
 
     // Check if file exists
     if (!fs.existsSync(filePath)) {

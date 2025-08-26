@@ -8,6 +8,12 @@ import { pipeline } from "stream/promises";
 
 export async function POST(request: NextRequest) {
   try {
+    // Check if we're in a serverless environment and /tmp is available
+    const isServerless = process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const tempBaseDir = isServerless ? "/tmp" : path.join(process.cwd(), "public");
+    
+    console.log(`Environment: ${isServerless ? 'Serverless' : 'Local'}, Temp dir: ${tempBaseDir}`);
+    
     const formData = await request.formData();
     const file = formData.get("file");
     const username = formData.get("username");
@@ -58,17 +64,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No valid photo URLs found in the Excel file" }, { status: 400 });
     }
 
+    // Warn about potential timeout on serverless platforms
+    if (isServerless && photoUrls.length > 50) {
+      console.warn(`Warning: Processing ${photoUrls.length} photos may exceed serverless function timeout limits`);
+    }
+
     // Create temporary directory for photos
     const timestamp = Date.now();
-    const tempDir = path.join(process.cwd(), "public", "temp", `photos_${timestamp}`);
-    const zipDir = path.join(process.cwd(), "public", "downloads");
+    const tempDir = path.join(tempBaseDir, `photos_${timestamp}`);
+    const zipDir = path.join(tempBaseDir, "downloads");
 
     // Ensure directories exist
+    console.log(`Creating directories: ${tempDir}, ${zipDir}`);
     await fs.promises.mkdir(tempDir, { recursive: true });
     await fs.promises.mkdir(zipDir, { recursive: true });
+    console.log('Directories created successfully');
 
     // Download photos with basic auth
     const auth = Buffer.from(`${username}:${password}`).toString("base64");
+    console.log(`Starting download of ${photoUrls.length} photos...`);
+    
     const downloadPromises = photoUrls.map(async (url, index) => {
       try {
         // Extract filename from URL or use index
@@ -98,6 +113,8 @@ export async function POST(request: NextRequest) {
 
     const results = await Promise.all(downloadPromises);
     const successfulDownloads = results.filter((r) => r.success);
+    
+    console.log(`Download completed: ${successfulDownloads.length}/${photoUrls.length} successful`);
 
     if (successfulDownloads.length === 0) {
       // Cleanup temp directory
@@ -108,6 +125,8 @@ export async function POST(request: NextRequest) {
     // Create zip file
     const zipFilename = `photos_${timestamp}.zip`;
     const zipPath = path.join(zipDir, zipFilename);
+    console.log(`Creating zip file: ${zipPath}`);
+    
     const output = fs.createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
 
