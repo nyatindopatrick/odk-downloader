@@ -70,16 +70,21 @@ export async function POST(request: NextRequest) {
     }
 
     // Limit the number of photos for serverless platforms to prevent timeouts
-    const maxPhotos = isServerless ? 30 : 100;
+    const maxPhotos = isServerless ? 100 : 500; // Increased from 30 to 100
     if (photoUrls.length > maxPhotos) {
       return NextResponse.json({ 
         error: `Too many photos (${photoUrls.length}). Maximum allowed is ${maxPhotos} for serverless deployment.`,
-        suggestion: "Please split your Excel file into smaller batches."
+        suggestion: "Please split your Excel file into smaller batches of 100 photos or less.",
+        alternatives: [
+          "Split your Excel file into multiple files with 100 photos each",
+          "Use the local development version for larger batches",
+          "Contact support for custom deployment options"
+        ]
       }, { status: 400 });
     }
 
     // Warn about potential timeout on serverless platforms
-    if (isServerless && photoUrls.length > 20) {
+    if (isServerless && photoUrls.length > 50) {
       console.warn(`Warning: Processing ${photoUrls.length} photos may exceed serverless function timeout limits`);
     }
 
@@ -98,45 +103,66 @@ export async function POST(request: NextRequest) {
     const auth = Buffer.from(`${username}:${password}`).toString("base64");
     console.log(`Starting download of ${photoUrls.length} photos...`);
     
-    // Add timeout for downloads
-    const downloadTimeout = Math.min(operationTimeout - 2000, 25000); // Leave 2 seconds for zip creation
+    // Add timeout for downloads - adjust based on photo count
+    const baseTimeout = isServerless ? 6000 : 25000; // Reduced base timeout for serverless
+    const downloadTimeout = Math.min(baseTimeout - 2000, 20000); // Leave 2 seconds for zip creation
     
-    const downloadPromises = photoUrls.map(async (url, index) => {
-      try {
-        // Extract filename from URL or use index
-        const urlParts = url.split("/");
-        const filename = urlParts[urlParts.length - 1] || `photo_${index + 1}.jpg`;
-
-        const response = await axios({
-          method: "GET",
-          url: url,
-          responseType: "stream",
-          headers: {
-            Authorization: `Basic ${auth}`,
-          },
-          timeout: downloadTimeout,
-        });
-
-        const filePath = path.join(tempDir!, filename);
-        const writer = fs.createWriteStream(filePath);
-
-        await pipeline(response.data, writer);
-        return { success: true, filename };
-      } catch (error: any) {
-        console.error(`Failed to download ${url}:`, error.message);
-        return { success: false, error: error.message };
-      }
-    });
-
-    // Add timeout for the entire download process
-    const downloadResults = await Promise.race([
-      Promise.all(downloadPromises),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error("Download timeout")), downloadTimeout)
-      )
-    ]);
+    // Process photos in smaller batches for better reliability
+    const batchSize = isServerless ? 25 : 50;
+    const batches = [];
     
-    const results = downloadResults as any[];
+    for (let i = 0; i < photoUrls.length; i += batchSize) {
+      batches.push(photoUrls.slice(i, i + batchSize));
+    }
+    
+    console.log(`Processing ${photoUrls.length} photos in ${batches.length} batches of ${batchSize}`);
+    
+    let allResults: any[] = [];
+    
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      console.log(`Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} photos)`);
+      
+      const downloadPromises = batch.map(async (url, index) => {
+        try {
+          // Extract filename from URL or use index
+          const urlParts = url.split("/");
+          const filename = urlParts[urlParts.length - 1] || `photo_${batchIndex * batchSize + index + 1}.jpg`;
+
+          const response = await axios({
+            method: "GET",
+            url: url,
+            responseType: "stream",
+            headers: {
+              Authorization: `Basic ${auth}`,
+            },
+            timeout: downloadTimeout,
+          });
+
+          const filePath = path.join(tempDir!, filename);
+          const writer = fs.createWriteStream(filePath);
+
+          await pipeline(response.data, writer);
+          return { success: true, filename };
+        } catch (error: any) {
+          console.error(`Failed to download ${url}:`, error.message);
+          return { success: false, error: error.message };
+        }
+      });
+
+      // Process each batch with timeout
+      const batchResults = await Promise.race([
+        Promise.all(downloadPromises),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Batch ${batchIndex + 1} download timeout`)), downloadTimeout)
+        )
+      ]) as any[];
+      
+      allResults = allResults.concat(batchResults);
+      console.log(`Batch ${batchIndex + 1} completed: ${batchResults.filter((r: any) => r.success).length}/${batch.length} successful`);
+    }
+    
+    const results = allResults;
     const successfulDownloads = results.filter((r) => r.success);
     
     console.log(`Download completed: ${successfulDownloads.length}/${photoUrls.length} successful`);
