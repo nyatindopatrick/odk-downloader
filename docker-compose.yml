@@ -1,0 +1,36 @@
+services:
+  server:
+    build: ./server
+    container_name: photo-downloader-server
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - CLIENT_URL=http://localhost
+    volumes:
+      - server_uploads:/app/uploads
+      - server_downloads:/app/downloads
+      - server_temp:/app/temp
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  client:
+    build: ./client
+    container_name: photo-downloader-client
+    ports:
+      - "80:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  server_uploads:
+  server_downloads:
+  server_temp:
