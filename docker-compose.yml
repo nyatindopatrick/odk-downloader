@@ -3,7 +3,7 @@ services:
     build: ./server
     container_name: photo-downloader-server
     ports:
-      - "3001:3001"
+      - "3008:3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -24,7 +24,7 @@ services:
     build: ./client
     container_name: photo-downloader-client
     ports:
-      - "80:80"
+      - "8090:80"
     depends_on:
       server:
         condition: service_healthy
